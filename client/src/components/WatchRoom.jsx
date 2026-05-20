@@ -4,81 +4,148 @@ import RoomInfo from './RoomInfo'
 import WatchLaterList from './WatchLaterList'
 import './WatchRoom.css'
 
-export default function WatchRoom({ socket, roomId, onLeave }) {
-  const [currentVideo, setCurrentVideo] = useState('')
-  const [playlist, setPlaylist] = useState([])
-  const [currentVideoIndex, setCurrentVideoIndex] = useState(-1)
+const STORAGE_KEY = 'watchTogether.demoState'
+
+const loadInitialState = () => {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY)
+    if (!raw) {
+      return { playlist: [], currentVideoIndex: -1, currentTime: 0 }
+    }
+
+    const parsed = JSON.parse(raw)
+    const playlist = Array.isArray(parsed.playlist) ? parsed.playlist : []
+    let currentVideoIndex = typeof parsed.currentVideoIndex === 'number' ? parsed.currentVideoIndex : -1
+    const currentTime = typeof parsed.currentTime === 'number' ? parsed.currentTime : 0
+
+    if (currentVideoIndex < -1) {
+      currentVideoIndex = -1
+    }
+
+    if (currentVideoIndex >= playlist.length) {
+      currentVideoIndex = playlist.length ? playlist.length - 1 : -1
+    }
+
+    return { playlist, currentVideoIndex, currentTime }
+  } catch (error) {
+    return { playlist: [], currentVideoIndex: -1, currentTime: 0 }
+  }
+}
+
+export default function WatchRoom({ roomId, onLeave }) {
+  const initialState = loadInitialState()
+  const [playlist, setPlaylist] = useState(() => initialState.playlist)
+  const [currentVideoIndex, setCurrentVideoIndex] = useState(() => initialState.currentVideoIndex)
+  const [currentTime, setCurrentTime] = useState(() => initialState.currentTime)
   const [inputUrl, setInputUrl] = useState('')
-  const [userCount, setUserCount] = useState(1)
   const playerRef = useRef(null)
+  const previousVideoIndexRef = useRef(initialState.currentVideoIndex)
+
+  const currentVideo = currentVideoIndex >= 0 && currentVideoIndex < playlist.length
+    ? playlist[currentVideoIndex]
+    : ''
 
   useEffect(() => {
-    if (!socket) return
+    if (playlist.length === 0 && currentVideoIndex !== -1) {
+      setCurrentVideoIndex(-1)
+      return
+    }
 
-    const handleRoomState = (state) => {
-      if (state.currentVideo) {
-        setCurrentVideo(state.currentVideo)
-        setCurrentVideoIndex(state.currentVideoIndex)
-        setPlaylist(state.playlist)
+    if (currentVideoIndex >= playlist.length) {
+      setCurrentVideoIndex(playlist.length - 1)
+    }
+  }, [playlist, currentVideoIndex])
+
+  useEffect(() => {
+    const previousIndex = previousVideoIndexRef.current
+    if (previousIndex !== currentVideoIndex) {
+      setCurrentTime(0)
+      previousVideoIndexRef.current = currentVideoIndex
+    }
+  }, [currentVideoIndex])
+
+  useEffect(() => {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify({
+      playlist,
+      currentVideoIndex,
+      currentTime
+    }))
+  }, [playlist, currentVideoIndex, currentTime])
+
+  useEffect(() => {
+    if (!currentVideo) return
+
+    const updatePlaybackSnapshot = () => {
+      const player = playerRef.current
+      if (!player?.getCurrentTime) return
+
+      const playbackTime = player.getCurrentTime()
+      if (typeof playbackTime === 'number' && !Number.isNaN(playbackTime)) {
+        setCurrentTime(playbackTime)
       }
     }
 
-    const handleVideoChanged = (data) => {
-      setCurrentVideo(data.currentVideo)
-      setCurrentVideoIndex(data.currentVideoIndex)
-      setPlaylist(data.playlist)
+    const intervalId = setInterval(updatePlaybackSnapshot, 2000)
+
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === 'hidden') {
+        updatePlaybackSnapshot()
+      }
     }
 
-    const handlePlaylistUpdated = (data) => {
-      setPlaylist(data.playlist)
-      setCurrentVideoIndex(data.currentVideoIndex)
-    }
-
-    const handleUserJoined = (data) => {
-      setUserCount(data.userCount)
-    }
-
-    const handleUserLeft = (data) => {
-      setUserCount(data.userCount)
-    }
-
-    socket.on('room-state', handleRoomState)
-    socket.on('video-changed', handleVideoChanged)
-    socket.on('playlist-updated', handlePlaylistUpdated)
-    socket.on('user-joined', handleUserJoined)
-    socket.on('user-left', handleUserLeft)
+    window.addEventListener('beforeunload', updatePlaybackSnapshot)
+    window.addEventListener('pagehide', updatePlaybackSnapshot)
+    document.addEventListener('visibilitychange', handleVisibilityChange)
 
     return () => {
-      socket.off('room-state', handleRoomState)
-      socket.off('video-changed', handleVideoChanged)
-      socket.off('playlist-updated', handlePlaylistUpdated)
-      socket.off('user-joined', handleUserJoined)
-      socket.off('user-left', handleUserLeft)
+      clearInterval(intervalId)
+      window.removeEventListener('beforeunload', updatePlaybackSnapshot)
+      window.removeEventListener('pagehide', updatePlaybackSnapshot)
+      document.removeEventListener('visibilitychange', handleVisibilityChange)
     }
-  }, [socket])
+  }, [currentVideo])
 
   const handleSetVideo = (e) => {
     e.preventDefault()
-    if (inputUrl.trim()) {
-      setInputUrl('')
-      socket.emit('set-video', {
-        roomId,
-        videoUrl: inputUrl.trim()
-      })
+    if (!inputUrl.trim()) return
+
+    const newUrl = inputUrl.trim()
+    setInputUrl('')
+
+    setPlaylist((prev) => [...prev, newUrl])
+    setCurrentVideoIndex((prevIndex) => (prevIndex === -1 ? 0 : prevIndex))
+    if (currentVideoIndex === -1) {
+      setCurrentTime(0)
     }
   }
 
   const handlePlayFromQueue = (index) => {
-    socket.emit('play-from-queue', {
-      roomId,
-      index
-    })
+    setCurrentVideoIndex(index)
   }
 
   const handleRemoveFromQueue = (index) => {
-    socket.emit('remove-from-queue', {
-      roomId,
-      index
+    setPlaylist((prev) => {
+      const next = prev.filter((_, itemIndex) => itemIndex !== index)
+
+      setCurrentVideoIndex((prevIndex) => {
+        if (prevIndex === -1) return -1
+        if (index < prevIndex) return prevIndex - 1
+        if (index === prevIndex) {
+          if (next.length === 0) return -1
+          return Math.min(prevIndex, next.length - 1)
+        }
+        return prevIndex
+      })
+
+      return next
+    })
+  }
+
+  const handleVideoEnded = () => {
+    setCurrentVideoIndex((prevIndex) => {
+      if (prevIndex === -1) return -1
+      if (prevIndex < playlist.length - 1) return prevIndex + 1
+      return prevIndex
     })
   }
 
@@ -91,17 +158,17 @@ export default function WatchRoom({ socket, roomId, onLeave }) {
       <div className="container">
         <div className="header">
           <h1>🎬 Watch Together</h1>
-          <RoomInfo roomId={roomId} userCount={userCount} onLeave={handleLeaveRoom} />
+          <RoomInfo roomId={roomId} userCount={1} onLeave={handleLeaveRoom} />
         </div>
 
         <div className="main-content">
           <div className="video-section">
             {currentVideo ? (
-              <YouTubePlayer 
-                videoUrl={currentVideo} 
-                roomId={roomId}
-                socket={socket}
+              <YouTubePlayer
+                videoUrl={currentVideo}
                 playerRef={playerRef}
+                onEnded={handleVideoEnded}
+                initialTime={currentTime}
               />
             ) : (
               <div className="no-video">
@@ -125,7 +192,7 @@ export default function WatchRoom({ socket, roomId, onLeave }) {
                   {currentVideo ? 'Add to Queue' : 'Play Now'}
                 </button>
               </form>
-              
+
               <div className="tips">
                 <h3>💡 Tips:</h3>
                 <ul>
@@ -137,7 +204,7 @@ export default function WatchRoom({ socket, roomId, onLeave }) {
               </div>
             </div>
 
-            <WatchLaterList 
+            <WatchLaterList
               playlist={playlist}
               currentVideoIndex={currentVideoIndex}
               onPlayFromQueue={handlePlayFromQueue}

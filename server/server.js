@@ -24,6 +24,7 @@ app.use(express.static(join(__dirname, '../client/dist')));
 
 // Store active rooms and their state
 const rooms = new Map();
+const ROOM_RETENTION_MS = 2 * 60 * 1000;
 
 io.on('connection', (socket) => {
   console.log('User connected:', socket.id);
@@ -39,11 +40,24 @@ io.on('connection', (socket) => {
         isPlaying: false,
         currentTime: 0,
         lastUpdated: Date.now(),
-        users: []
+        users: [],
+        cleanupTimer: null
       });
     }
 
     const room = rooms.get(roomId);
+    if (room.cleanupTimer) {
+      clearTimeout(room.cleanupTimer);
+      room.cleanupTimer = null;
+    }
+    const now = Date.now();
+
+    if (room.isPlaying) {
+      const elapsedSeconds = (now - room.lastUpdated) / 1000;
+      room.currentTime = Math.max(0, room.currentTime + elapsedSeconds);
+    }
+
+    room.lastUpdated = now;
     room.users.push(socket.id);
 
     const currentVideo = room.currentVideoIndex >= 0 ? room.playlist[room.currentVideoIndex] : null;
@@ -77,7 +91,7 @@ io.on('connection', (socket) => {
         room.playlist.push(videoUrl);
         room.currentVideoIndex = 0;
         room.currentTime = 0;
-        room.isPlaying = false;
+        room.isPlaying = true;
         room.lastUpdated = Date.now();
         
         io.to(roomId).emit('video-changed', {
@@ -107,7 +121,7 @@ io.on('connection', (socket) => {
     if (room && index >= 0 && index < room.playlist.length) {
       room.currentVideoIndex = index;
       room.currentTime = 0;
-      room.isPlaying = false;
+      room.isPlaying = true;
       room.lastUpdated = Date.now();
       
       io.to(roomId).emit('video-changed', {
@@ -141,23 +155,43 @@ io.on('connection', (socket) => {
   });
 
   // Sync play
-  socket.on('play', (roomId) => {
+  socket.on('play', (payload) => {
+    const { roomId, currentTime } = typeof payload === 'string' ? { roomId: payload } : payload;
     const room = rooms.get(roomId);
     if (room) {
+      if (typeof currentTime === 'number' && !Number.isNaN(currentTime)) {
+        room.currentTime = currentTime;
+      }
       room.isPlaying = true;
       room.lastUpdated = Date.now();
       io.to(roomId).emit('video-play', {
-        timestamp: Date.now()
+        timestamp: Date.now(),
+        currentTime: room.currentTime
       });
     }
   });
 
   // Sync pause
-  socket.on('pause', (roomId) => {
+  socket.on('pause', (payload) => {
+    const { roomId, currentTime } = typeof payload === 'string' ? { roomId: payload } : payload;
     const room = rooms.get(roomId);
     if (room) {
+      const now = Date.now();
+
+      if (room.isPlaying) {
+        const elapsedSeconds = (now - room.lastUpdated) / 1000;
+        room.currentTime = Math.max(0, room.currentTime + elapsedSeconds);
+      }
+
+      if (typeof currentTime === 'number' && !Number.isNaN(currentTime)) {
+        room.currentTime = currentTime;
+      }
+
       room.isPlaying = false;
-      io.to(roomId).emit('video-pause');
+      room.lastUpdated = now;
+      io.to(roomId).emit('video-pause', {
+        currentTime: room.currentTime
+      });
     }
   });
 
@@ -174,13 +208,31 @@ io.on('connection', (socket) => {
     }
   });
 
+  // Sync playback snapshot (used before reload)
+  socket.on('sync-state', (data) => {
+    const { roomId, currentTime, isPlaying } = data || {};
+    const room = rooms.get(roomId);
+
+    if (!room) return;
+
+    if (typeof currentTime === 'number' && !Number.isNaN(currentTime)) {
+      room.currentTime = currentTime;
+    }
+
+    if (typeof isPlaying === 'boolean') {
+      room.isPlaying = isPlaying;
+    }
+
+    room.lastUpdated = Date.now();
+  });
+
   // User skips to next video
   socket.on('skip-to-next', (roomId) => {
     const room = rooms.get(roomId);
     if (room && room.currentVideoIndex < room.playlist.length - 1) {
       room.currentVideoIndex++;
       room.currentTime = 0;
-      room.isPlaying = false;
+      room.isPlaying = true;
       room.lastUpdated = Date.now();
       
       io.to(roomId).emit('video-changed', {
@@ -202,7 +254,9 @@ io.on('connection', (socket) => {
         room.users.splice(index, 1);
         
         if (room.users.length === 0) {
-          rooms.delete(roomId);
+          room.cleanupTimer = setTimeout(() => {
+            rooms.delete(roomId);
+          }, ROOM_RETENTION_MS);
         } else {
           io.to(roomId).emit('user-left', {
             userCount: room.users.length
@@ -217,3 +271,4 @@ const PORT = process.env.PORT || 3000;
 httpServer.listen(PORT, () => {
   console.log(`Server running on http://localhost:${PORT}`);
 });
+  

@@ -4,6 +4,30 @@
   margin: 0 auto;
 }
 
+.theme-toggle {
+  display: flex;
+  justify-content: flex-end;
+  margin-bottom: 12px;
+}
+
+.theme-toggle-btn {
+  border: none;
+  border-radius: 999px;
+  padding: 8px 14px;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  background: rgba(255, 255, 255, 0.8);
+  color: #4b5563;
+  box-shadow: 0 6px 18px rgba(15, 23, 42, 0.12);
+  transition: all 0.2s ease;
+}
+
+.theme-toggle-btn:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 8px 22px rgba(15, 23, 42, 0.18);
+}
+
 .connection-status {
   background: rgba(255, 255, 255, 0.1);
   backdrop-filter: blur(10px);
